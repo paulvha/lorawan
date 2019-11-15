@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# version 1.0 / November 2019 / paulvh
+#
+# special version of the orginal checkdog.
+# added check_kill to improve stability in downlink message
+# lgo1_pkt_fwd seems to be working only 1 or 2 times for downlink messages
+#
+# This should be placed /usr/bin and used instead of checkdog crontab.
+# it should run every minute (to check use : crontab -e)
+#
+#
+# given the instable downlink of the lg01_pkt_fwd, the executable is
+# kill every 5 minutes (300 Seconds)
+# A sketch on the Arduino could speed that up by updating /var/iot/KILL
+# with a time that NOW - 300 seconds.
+
+IOT_DIR="/etc/iot/scripts/"
+KILL_IND="/var/iot/KILL"
+CFGDATA="/var/iot/cfgdata"
+
+check_kill() {
+
+    # this will kill the script running at least every 5 min
+    # it will restart as well. necessary for downlink communication
+    # as the script will hang often in downlink
+
+    if [ -f $KILL_IND ]; then
+        echo "Kill file detected"
+
+        let kcurrent=`date +%s`
+        let killtime=`cat "$KILL_IND"`
+
+        if [[ ! -z "$killtime" ]]; then
+            let pass=`expr $kcurrent - $killtime`
+            # 300 seconds is 5 min
+            if [ $pass -lt 300 ]; then
+               return
+            fi
+        fi
+
+        service=`uci get iot-services.general.server_type`
+        script_name=`uci get $service.general.routine_script`
+        script=$IOT_DIR$script_name
+        servpid=`ps w| grep $script_name | grep -v grep | awk '{print $1}'`
+
+        if [[ ! -z "$servpid" ]]; then
+
+            # wait as long as uplink message pending / handled
+            while [[ -s $CFGDATA ]]
+            do
+                sleep 1
+            done
+
+            # kill running service
+            kill -9 $servpid
+            echo "killed process $servpid"
+        fi
+
+        # give time to stop
+        sleep 1
+
+        # reset the kill instruction
+        let kncurrent=`date +%s`
+        echo $kncurrent >  $KILL_IND
+        echo "updated $KILL_IND"
+    # set file for first time
+    else
+        let kncurrent=`date +%s`
+        echo $kncurrent >  $KILL_IND
+        echo "created $KILL_IND"
+    fi
+    echo Kill check done
+}
+
+restart_service() {
+    service=`uci get iot-services.general.server_type`
+    if [ "$service" != "disabled" ];then
+        script_name=`uci get $service.general.routine_script`
+        script=$IOT_DIR$script_name
+        servpid=`ps w| grep $script_name | grep -v grep | awk '{print $1}'`
+
+        if [[ -z "$servpid" ]]; then
+            if [ "${script%.lua}" != "$script" ]; then
+                lua $script &
+            else
+                $script 2>&1 > /dev/null &
+            fi
+        fi
+    fi
+}
+
+run_reset_mcu()
+{
+    dogfile="/var/iot/dog"
+    if [ -f "$dogfile" ]; then
+        let current=`date +%s`
+        let feedtime=`cat "$dogfile"`
+        if [[ ! -z "$feedtime" ]]; then
+            let pass=`expr $current - $feedtime`
+            if [ $pass -gt 300 ]; then
+                reset-mcu
+            fi
+        fi
+    fi
+}
+
+
+check_kill
+
+restart_service
+
+mcu_watchdog=`uci get sensor.mcu.mcu_watchdog`
+if [ "$mcu_watchdog" != "disable" ]; then
+    run_reset_mcu
+fi
